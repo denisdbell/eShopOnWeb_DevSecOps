@@ -58,7 +58,29 @@ stages:
         imageName: eshoponweb/web:$(Build.BuildId)
         includeLatestTag: true
 
-stages:
+        
+    - task: ms.advancedsecurity-tasks.codeql.init.AdvancedSecurity-Codeql-Init@1
+      condition: and(succeeded(), ne(variables['Build.Reason'], 'PullRequest'))
+      displayName: 'Initialize CodeQL'
+      inputs:
+        languages: csharp
+        querysuite: default
+    - task: DotNetCoreCLI@2
+      displayName: Build
+      inputs:
+        projects: '**/*.csproj'
+        arguments: '--configuration $(BuildConfiguration)'
+    - task: ms.advancedsecurity-tasks.dependency-scanning.AdvancedSecurity-Dependency-Scanning@1
+      condition: and(succeeded(), ne(variables['Build.Reason'], 'PullRequest'))
+      displayName: 'Dependency Scanning'
+    - task: ms.advancedsecurity-tasks.codeql.analyze.AdvancedSecurity-Codeql-Analyze@1
+      condition: and(succeeded(), ne(variables['Build.Reason'], 'PullRequest'))
+      displayName: 'Perform CodeQL analysis'
+    - task: ms.advancedsecurity-tasks.codeql.enhance.AdvancedSecurity-Publish@1
+      condition: and(succeeded(), ne(variables['Build.Reason'], 'PullRequest'))
+      displayName: 'Publish Results'
+
+
 - stage: Deploy
   jobs:
   - job: Deploy
