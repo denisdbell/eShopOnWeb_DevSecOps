@@ -1,128 +1,91 @@
-trigger:
-- main
+# NAME THE PIPELINE SAME AS FILE (WITHOUT ".yml")
 
-pool:
-  vmImage: ubuntu latest
+resources:
+  repositories:
+    - repository: self
+      trigger: none
 
-extends: 
-  template: template.yaml
-  parameters:
-    stages:
-      - stage: Build
-        displayName: 'Build'
-        jobs:
-        - job: Build
-          steps:
-          - checkout: self
+variables:
+  azureServiceConnection: 'eShopOnWeb'
+  subscriptionId: 'Your-Subscription-ID'
+  resourceGroup: 'DevSecOps-Book-RG'
+  location: 'westeurope'
 
-          - task: DotNetCoreCLI@2
-            displayName: Restore 
-            inputs:
-              command: restore
-              projects: '**/*.csproj'
+stages:
+- stage: Build
+  jobs:
+  - job: Build
+    pool:
+      vmImage: 'ubuntu-latest'
+    steps:
+    - task: AzureResourceManagerTemplateDeployment@3
+      displayName: Deploy ACR using Bicep
+      inputs:
+        deploymentScope: 'Resource Group'
+        azureResourceManagerConnection: $(azureServiceConnection)
+        subscriptionId: $(subscriptionId)
+        action: 'Create Or Update Resource Group'
+        resourceGroupName: '$(resourceGroup)'
+        location: '$(location)'
+        templateLocation: 'Linked artifact'
+        csmFile: 'infra/acr.bicep'
+        deploymentMode: 'Incremental'
+        deploymentOutputs: 'outputJson'
+    - task: PowerShell@2
+      displayName: Parse Bicep Output
+      inputs:
+        targetType: 'inline'
+        script: |
+          $var=ConvertFrom-Json '$(outputJson)'
+          $value=$var.acrLoginServer.value
+          Write-Host "##vso[task.setvariable variable=acrLoginServer;]$value"
+    - task: Docker@0
+      displayName: 'Build the docker image'
+      inputs:
+        azureSubscription: $(azureServiceConnection)
+        azureContainerRegistry: $(acrLoginServer)
+        dockerFile: 'src/Web/Dockerfile'
+        defaultContext: false
+        context: $(Build.SourcesDirectory)
+        includeLatestTag: true
+        imageName: eshoponweb/web:$(Build.BuildId)
+    - task: Docker@0
+      displayName: 'Push the docker images'
+      inputs:
+        azureSubscription: $(azureServiceConnection)
+        azureContainerRegistry: $(acrLoginServer)
+        action: 'Push an image'
+        imageName: eshoponweb/web:$(Build.BuildId)
+        includeLatestTag: true
 
-          - task: ms.advancedsecurity-tasks.codeql.init.AdvancedSecurity-Codeql-Init@1
-            condition: and(succeeded(), ne(variables['Build.Reason'], 'PullRequest'))
-            displayName: 'Initialize CodeQL'
-            inputs:
-              languages: csharp
-              querysuite: default
-
-          - task: DotNetCoreCLI@2
-            displayName: Build
-            inputs:
-              projects: '**/*.csproj'
-              arguments: '--configuration $(BuildConfiguration)'
-
-          - task: ms.advancedsecurity-tasks.dependency-scanning.AdvancedSecurity-Dependency-Scanning@1
-            condition: and(succeeded(), ne(variables['Build.Reason'], 'PullRequest'))
-            displayName: 'Dependency Scanning'
-
-          - task: ms.advancedsecurity-tasks.codeql.analyze.AdvancedSecurity-Codeql-Analyze@1
-            condition: and(succeeded(), ne(variables['Build.Reason'], 'PullRequest'))
-            displayName: 'Perform CodeQL analysis'
-
-          - task: ms.advancedsecurity-tasks.codeql.enhance.AdvancedSecurity-Publish@1
-            condition: and(succeeded(), ne(variables['Build.Reason'], 'PullRequest'))
-            displayName: 'Publish Results'
-
-          - task: DotNetCoreCLI@2
-            displayName: Test
-            inputs:
-              command: test
-              projects: '[Tt]ests/**/*.csproj'
-              arguments: '--configuration $(BuildConfiguration) --collect:"Code coverage"'
-
-          - task: DotNetCoreCLI@2
-            displayName: Publish
-            inputs:
-              command: publish
-              publishWebProjects: True
-              arguments: '--configuration $(BuildConfiguration) --output $(build.artifactstagingdirectory)'
-              zipAfterPublish: True
-
-          - task: PublishBuildArtifacts@1
-            displayName: 'Publish Artifact'
-            inputs:
-              PathtoPublish: '$(build.artifactstagingdirectory)'
-            condition: succeededOrFailed()
-          
-          - task: CopyFiles@2
-            displayName: 'Copy ARM template files'
-            inputs:
-              SourceFolder: env/eshopenv/
-              Contents: |
-                eShopOnWeb.param.json
-                eShopOnWebResource.json
-              TargetFolder: '$(build.artifactstagingdirectory)'
-
-          - task: PublishBuildArtifacts@1
-            displayName: 'Publish Artifact'
-            inputs:
-              PathtoPublish: '$(build.artifactstagingdirectory)'
-            #condition: succeededOrFailed()
-         
-
-
-      - stage: Test
-        condition: and(succeeded(), ne(variables['Build.Reason'], 'PullRequest'))
-        dependsOn: Build
-        displayName: 'Test Deployment'
-        jobs:
-        - job: 'Creating_Infra'
-          steps:
-          - download: current
-            artifact: drop
-
-          - task: AzureResourceGroupDeployment@2
-            displayName: 'ARM Template deployment: Resource Group scope'
-            inputs:
-              azureSubscription: 'eShopOnWeb'
-              resourceGroupName: '$(rg_name)'
-              location: 'Southeast Asia'
-              csmFile: '$(Agent.BuildDirectory)/drop/eShopOnWebResource.json'
-              csmParametersFile: '$(Agent.BuildDirectory)/drop/eShopOnWeb.param.json'
-              overrideParameters: '-WebsiteName $(WebsiteName) -eshop_ServerName $(eshop_ServerName)'
-            
-        - deployment: DeployWeb
-          dependsOn:
-          - Creating_Infra
-          displayName: Deploy to Test Environment
-
-          environment: 
-            name: 'Test'
-
-          strategy:
-            runOnce:
-              deploy:
-                steps:
-                - download: current
-                  artifact: drop
-                
-                - task: AzureWebApp@1
-                  displayName: 'Test deployment'
-                  inputs:
-                    azureSubscription: 'eShopOnWeb'
-                    appType: webApp
-                    appName: $(WebsiteName)-test
-                    package: '$(Agent.BuildDirectory)/drop/Web.zip'
+stages:
+- stage: Deploy
+  jobs:
+  - job: Deploy
+    pool:
+      vmImage: ubuntu-latest
+    steps:
+    - task: AzureResourceManagerTemplateDeployment@3
+      displayName: Deploy App Service using Bicep
+      inputs:
+        deploymentScope: 'Resource Group'
+        azureResourceManagerConnection: $(azureServiceConnection)
+        subscriptionId: $(subscriptionId)
+        action: 'Create Or Update Resource Group'
+        resourceGroupName: '$(resourceGroup)'
+        location: '$(location)'
+        templateLocation: 'Linked artifact'
+        csmFile: 'infra/webapp-docker.bicep'
+        deploymentMode: 'Incremental'
+    - task: AzureResourceManagerTemplateDeployment@3
+      displayName: Add Role Assignment using Bicep
+      inputs:
+        deploymentScope: 'Resource Group'
+        azureResourceManagerConnection: $(azureServiceConnection)
+        subscriptionId: $(subscriptionId)
+        action: 'Create Or Update Resource Group'
+        resourceGroupName: '$(resourceGroup)'
+        location: '$(location)'
+        templateLocation: 'Linked artifact'
+        csmFile: 'infra/webapp-to-acr-roleassignment.bicep'
+        deploymentMode: 'Incremental'
